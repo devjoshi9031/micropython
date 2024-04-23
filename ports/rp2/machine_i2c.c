@@ -27,10 +27,11 @@
 #include "py/runtime.h"
 #include "py/mphal.h"
 #include "py/mperrno.h"
+#include "py/objarray.h"
 #include "extmod/modmachine.h"
 
 #include "hardware/i2c.h"
-
+#include "pico/i2c_slave.h"
 #define DEFAULT_I2C_FREQ (400000)
 #define DEFAULT_I2C_TIMEOUT (50000)
 
@@ -72,6 +73,17 @@
 // SDA/SCL on even/odd pins, I2C0/I2C1 on even/odd pairs of pins.
 #define IS_VALID_SCL(i2c, pin) (((pin) & 1) == 1 && (((pin) & 2) >> 1) == (i2c))
 #define IS_VALID_SDA(i2c, pin) (((pin) & 1) == 0 && (((pin) & 2) >> 1) == (i2c))
+#define MICROPY_I2C_DEFAULT_SLAVE_ADDR  (0x0B)
+#define MICROPY_I2C_MAX_SLAVE_ADDR      (0x7F)
+
+typedef struct _slave_i2c_obj_t {
+    uint8_t     mode;   /*!< slave_mode of type slave_mode_t */
+    bool     reg_addr_written;   /*!< flag to store if the register index is written or not. */
+    uint8_t     addr;   /*!< slave addr */
+    uint        mem_buf_size;
+    uint8_t*    mem_buf;
+    uint16_t    reg_addr;  /*!< var. to store the register index that master wants to write/read to/from.*/
+}slave_i2c_obj_t;
 
 typedef struct _machine_i2c_obj_t {
     mp_obj_base_t base;
@@ -81,12 +93,76 @@ typedef struct _machine_i2c_obj_t {
     uint8_t sda;
     uint32_t freq;
     uint32_t timeout;
+    uint8_t i2c_mode;
+    slave_i2c_obj_t slave_cxt;
 } machine_i2c_obj_t;
+
+typedef enum
+{
+    MASTER,
+    SLAVE,
+} i2c_mode_t;
+
+typedef enum
+{
+    SLAVE_MODE_88,
+    SLAVE_MODE_816,
+    SLAVE_MODE_1616,
+    SLAVE_MODE_INVALID,
+} slave_mode_t;
 
 static machine_i2c_obj_t machine_i2c_obj[] = {
     {{&machine_i2c_type}, i2c0, 0, MICROPY_HW_I2C0_SCL, MICROPY_HW_I2C0_SDA, 0},
     {{&machine_i2c_type}, i2c1, 1, MICROPY_HW_I2C1_SCL, MICROPY_HW_I2C1_SDA, 0},
 };
+
+void machine_i2c_slave_handler(i2c_inst_t * i2c, i2c_slave_event_t event)
+{
+    uint i2c_id = i2c_hw_index(i2c);
+    machine_i2c_obj_t* self = &machine_i2c_obj[i2c_id];
+    switch(event)
+    {
+        /**
+         * @brief I2C_SLAVE_REQUEST will be passed in when the MASTER request for data. 
+         */
+        case I2C_SLAVE_REQUEST:
+            if(self->slave_cxt.reg_addr >= self->slave_cxt.mem_buf_size)
+            {
+                /** Send last byte if the register index request is out of bound of the reg map.
+                 * TODO: Need to check if we can NACK this request as it is not valid.
+                */
+                self->slave_cxt.reg_addr = self->slave_cxt.mem_buf_size-1;
+            }
+            else
+            {
+                i2c_write_byte_raw(i2c,self->slave_cxt.mem_buf[self->slave_cxt.reg_addr]);
+                self->slave_cxt.reg_addr++;
+            }
+            break;
+
+        /**
+         * @brief Everytime this callback function is called, we will come to this case as the first bytes will be the register index master wants to read or write.
+         */
+        case I2C_SLAVE_RECEIVE:
+            if(!self->slave_cxt.reg_addr_written)
+            {
+                /** If it is the first time we are entering this case, the first 1 or 2 bytes we will always treat it as register index. */
+                uint8_t reg_addr = i2c_read_byte_raw(i2c);
+                self->slave_cxt.reg_addr = reg_addr;
+                self->slave_cxt.reg_addr_written = true;
+            }
+            else
+            {
+                self->slave_cxt.mem_buf[self->slave_cxt.reg_addr] = i2c_read_byte_raw(i2c);
+                self->slave_cxt.reg_addr++;
+            }
+            break;
+
+        case I2C_SLAVE_FINISH:
+            self->slave_cxt.reg_addr_written=false;
+            break;
+    }
+}
 
 static void machine_i2c_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     machine_i2c_obj_t *self = MP_OBJ_TO_PTR(self_in);
@@ -95,13 +171,17 @@ static void machine_i2c_print(const mp_print_t *print, mp_obj_t self_in, mp_prin
 }
 
 mp_obj_t machine_i2c_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
-    enum { ARG_id, ARG_freq, ARG_scl, ARG_sda, ARG_timeout };
+    enum { ARG_id, ARG_freq, ARG_mode, ARG_scl, ARG_sda, ARG_timeout,  ARG_slave_mode, ARG_slave_addr, ARG_slave_mem_buf };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_id, MP_ARG_REQUIRED | MP_ARG_OBJ },
         { MP_QSTR_freq, MP_ARG_INT, {.u_int = DEFAULT_I2C_FREQ} },
+        { MP_QSTR_mode, MP_ARG_INT, {.u_int = MASTER} },
         { MP_QSTR_scl, MICROPY_I2C_PINS_ARG_OPTS | MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
         { MP_QSTR_sda, MICROPY_I2C_PINS_ARG_OPTS | MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
         { MP_QSTR_timeout, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = DEFAULT_I2C_TIMEOUT} },
+        { MP_QSTR_slave_mode, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = SLAVE_MODE_88} },
+        { MP_QSTR_slave_addr, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = MICROPY_I2C_DEFAULT_SLAVE_ADDR} },
+        { MP_QSTR_slave_mem_buf, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
     };
 
     // Parse args.
@@ -133,10 +213,32 @@ mp_obj_t machine_i2c_make_new(const mp_obj_type_t *type, size_t n_args, size_t n
         self->sda = sda;
     }
 
+    if(args[ARG_mode].u_int == SLAVE)
+    {
+        self->i2c_mode = args[ARG_mode].u_int;
+        if(args[ARG_slave_mode].u_int >= SLAVE_MODE_INVALID)
+            mp_raise_ValueError(MP_ERROR_TEXT("Invalid Slave mode. Acceptable values are [I2C.SLAVE_MODE_88, I2C.SLAVE_MODE_816, I2C.SLAVE_MODE_1616].\n"));
+        
+        if(args[ARG_slave_addr].u_int > MICROPY_I2C_MAX_SLAVE_ADDR)
+            mp_raise_ValueError(MP_ERROR_TEXT("Invalid Slave Addr. Slave Addr has be between [0 - 127].\n"));
+        
+        if(args[ARG_slave_mem_buf].u_obj == MP_OBJ_NULL)
+            mp_raise_ValueError(MP_ERROR_TEXT("argument slave_mem_buf not provided. Please provide a buffer to use as register map for I2C slave.\n"));
+
+        self->slave_cxt.mode = args[ARG_slave_mode].u_int;
+        self->slave_cxt.addr = args[ARG_slave_addr].u_int;
+        mp_obj_array_t *bytearray = (mp_obj_array_t*) MP_OBJ_TO_PTR(args[ARG_slave_mem_buf].u_obj);
+        self->slave_cxt.mem_buf = (uint8_t*)(bytearray->items);
+        self->slave_cxt.mem_buf_size = (uint)(bytearray->len);
+    }
+
     // Initialise the I2C peripheral if any arguments given, or it was not initialised previously.
     if (n_args > 1 || n_kw > 0 || self->freq == 0) {
         self->freq = args[ARG_freq].u_int;
-        i2c_init(self->i2c_inst, self->freq);
+        if(self->i2c_mode == SLAVE)
+            i2c_slave_init(self->i2c_inst, self->slave_cxt.addr, &machine_i2c_slave_handler);
+        else
+            i2c_init(self->i2c_inst, self->freq);
         self->freq = i2c_set_baudrate(self->i2c_inst, self->freq);
         self->timeout = args[ARG_timeout].u_int;
         gpio_set_function(self->scl, GPIO_FUNC_I2C);

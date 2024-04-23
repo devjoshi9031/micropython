@@ -199,6 +199,7 @@ set(PICO_SDK_COMPONENTS
     pico_util
     tinyusb_common
     tinyusb_device
+    pico_i2c_slave
 )
 
 # Use our custom pico_float_micropython float implementation.  This is needed for two reasons:

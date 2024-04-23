@@ -35,6 +35,19 @@
 
 #define SOFT_I2C_DEFAULT_TIMEOUT_US (50000) // 50ms
 
+typedef enum
+{
+    MASTER,
+    SLAVE,
+} i2c_mode_t;
+
+typedef enum
+{
+    SLAVE_MODE_88,
+    SLAVE_MODE_816,
+    SLAVE_MODE_1616,
+} slave_mode_t;
+
 #if MICROPY_PY_MACHINE_SOFTI2C
 
 typedef mp_machine_soft_i2c_obj_t machine_i2c_obj_t;
@@ -651,6 +664,13 @@ static const mp_rom_map_elem_t machine_i2c_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_readfrom_mem), MP_ROM_PTR(&machine_i2c_readfrom_mem_obj) },
     { MP_ROM_QSTR(MP_QSTR_readfrom_mem_into), MP_ROM_PTR(&machine_i2c_readfrom_mem_into_obj) },
     { MP_ROM_QSTR(MP_QSTR_writeto_mem), MP_ROM_PTR(&machine_i2c_writeto_mem_obj) },
+
+    //constants
+    { MP_ROM_QSTR(MP_QSTR_SLAVE), MP_ROM_INT(SLAVE)},
+    { MP_ROM_QSTR(MP_QSTR_MASTER), MP_ROM_INT(MASTER)},
+    { MP_ROM_QSTR(MP_QSTR_SLAVE_MODE_88), MP_ROM_INT(SLAVE_MODE_88)},
+    { MP_ROM_QSTR(MP_QSTR_SLAVE_MODE_816), MP_ROM_INT(SLAVE_MODE_816)},     /** SLAVE_MODE_8_16 is not currently supported.*/
+    { MP_ROM_QSTR(MP_QSTR_SLAVE_MODE_1616), MP_ROM_INT(SLAVE_MODE_1616)},   /** SLAVE_MODE_16_16 is not currently supported.*/
 };
 MP_DEFINE_CONST_DICT(mp_machine_i2c_locals_dict, machine_i2c_locals_dict_table);
 
